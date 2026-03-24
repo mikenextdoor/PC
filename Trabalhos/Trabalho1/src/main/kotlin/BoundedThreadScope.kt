@@ -7,7 +7,7 @@ import kotlin.time.Duration
 
 class ThreadScope(private val name: String, private val threadBuilder: Thread.Builder, private val maxThreads: Int) : Closeable {
 
-    private val mutex = ReentrantLock()
+    private val mutex: Lock = ReentrantLock()
     private val condition = mutex.newCondition()
 
     private var closed = false

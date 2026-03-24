@@ -1,5 +1,10 @@
 import java.io.Closeable
-import kotlin.time.Duration
+import java.util.LinkedList
+import java.util.concurrent.locks.Condition
+import java.util.concurrent.locks.Lock
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+import java.time.Duration
 
 /**
  * An _event topic_ to where:
@@ -7,14 +12,39 @@ import kotlin.time.Duration
  * - Consuming parties can register subscribers. Each subscriber should receive the events published to the topic.
  */
 class BoundedEventTopic<T>(
-    capacity: Int,
+    private val capacity: Int,
 ) : Closeable {
 
     /**
      * Publishes an event to the topic. If capacity is exceeded, then the oldest event is discarded.
      */
+    init {
+        require(capacity > 0)
+    }
+
+    private val mutex: Lock = ReentrantLock()
+    private val notEmpty: Condition = mutex.newCondition()
+    private val buffer = LinkedList<Pair<Long, T>>()
+    private var nextIndex = 0L
+    private var closed = false
+
+    /**
+     * Publishes an event to the topic. If capacity is exceeded, then the oldest event is discarded.
+     */
     fun publish(event: T): PublishResult {
-        TODO("To be implemented")
+        mutex.withLock {
+            if (closed) return PublishResult.Closed
+
+            val idx = nextIndex
+            nextIndex += 1
+
+            buffer.addLast(idx to event)
+            if (buffer.size > capacity) {
+                buffer.removeFirst()
+            }
+            notEmpty.signalAll()
+            return PublishResult.Success
+        }
     }
 
     /**
@@ -32,15 +62,58 @@ class BoundedEventTopic<T>(
      * Subscribes to the topic, returning a `Subscription`, or `null` if the topic is closed.
      */
     fun subscribe(): Subscription<T>? {
-        TODO("To be implemented")
+        mutex.withLock {
+            if (closed) return null
+            val startIndex = buffer.firstOrNull()?.first ?: nextIndex
+            return object: Subscription<T> {
+                private var nextToRead = startIndex
+                private var isClosed = false
+
+                override fun read(timeout: Duration): Subscription.ReadResult<T> {
+                    mutex.withLock {
+                        if (closed || isClosed) return Subscription.ReadResult.Closed
+
+                        var remaining = timeout.toNanos()
+
+                        while (true) {
+                            if (closed || isClosed) return Subscription.ReadResult.Closed
+                            val first = buffer.firstOrNull()
+
+                            if (first != null && nextToRead < first.first) {
+                                nextToRead = first.first
+                            }
+                            val event = buffer.firstOrNull { it.first == nextToRead }
+                            if (event != null) {
+                                nextToRead++
+                                return Subscription.ReadResult.Success(event.second, event.first)
+                            }
+                            if (remaining <= 0) {
+                                return Subscription.ReadResult.Timeout
+                            }
+                            remaining = notEmpty.awaitNanos(remaining)
+                        }
+                    }
+                }
+                override fun close() {
+                    mutex.withLock {
+                        isClosed = true
+                        notEmpty.signalAll()
+                    }
+                }
+            }
+        }
     }
+
 
     /**
      * Closes the topic.
      * When a topic is closed, then any `publish` or `read` on a subscription will fail.
      */
     override fun close() {
-        TODO("To be implemented")
+        mutex.withLock {
+            closed = true
+            notEmpty.signalAll()
+        }
     }
 
     /**
