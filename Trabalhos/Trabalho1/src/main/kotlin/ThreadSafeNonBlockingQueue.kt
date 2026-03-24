@@ -3,6 +3,7 @@
  * a _weakly consistent_ iterator.
  */
 class ThreadSafeNonBlockingQueue<T> : Iterable<T> {
+
     /**
      * Adds an element to the _end_ of the queue.
      */
